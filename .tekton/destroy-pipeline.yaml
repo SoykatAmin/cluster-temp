@@ -1,0 +1,99 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: "cluster-lunedi-destroy"
+  namespace: "bs-team-alpha-dev"
+  labels:
+    app.kubernetes.io/name: "cluster-lunedi"
+    app.kubernetes.io/part-of: "cluster-lunedi"
+    app.kubernetes.io/component: pipeline-destroy
+    app.kubernetes.io/managed-by: backstage-scaffolder
+    owner: so.amin
+  annotations:
+    tekton.dev/displayName: "EKS Cluster cluster-lunedi Teardown Pipeline"
+    tekton.dev/description: >-
+      Destroys AWS EKS Cluster cluster-lunedi and node groups
+      via git-clone -> terraform-destroy, leaving the shared platform VPC intact.
+spec:
+  params:
+    - name: repo-url
+      type: string
+      description: Target Git repository holding Terraform infrastructure code.
+    - name: revision
+      type: string
+      default: main
+      description: Git commit SHA, branch or tag.
+    - name: cluster-name
+      type: string
+      default: "cluster-lunedi"
+      description: Name of the EKS cluster.
+    - name: aws-region
+      type: string
+      default: "eu-west-1"
+      description: Target AWS region.
+    - name: state-bucket
+      type: string
+      default: "so-amin-idp-terraform-backend"
+      description: Platform remote state S3 bucket.
+    - name: state-lock-table
+      type: string
+      default: "so-amin-idp-terraform-backend-lock-table"
+      description: Platform state locking DynamoDB table.
+
+  workspaces:
+    - name: shared-data
+      description: PersistentVolumeClaim storing repository workspace across tasks.
+
+  tasks:
+    - name: git-clone
+      taskSpec:
+        params:
+          - name: url
+            type: string
+          - name: revision
+            type: string
+        workspaces:
+          - name: output
+
+        steps:
+          - name: clone
+            image: alpine/git:2.45.2
+            workingDir: $(workspaces.output.path)
+            script: |
+              #!/usr/bin/env sh
+              set -eu
+              git config --global --add safe.directory '*'
+              rm -rf ./* ./.[!.]*
+              git init
+              git remote add origin "$(params.url)"
+              git fetch --depth 1 origin "$(params.revision)"
+              git checkout -q FETCH_HEAD
+      params:
+        - name: url
+          value: $(params.repo-url)
+        - name: revision
+          value: $(params.revision)
+
+      workspaces:
+        - name: output
+          workspace: shared-data
+
+    - name: terraform-destroy
+      runAfter:
+        - git-clone
+      taskRef:
+        name: terraform-destroy
+      params:
+        - name: terraform-dir
+          value: "terraform"
+
+        - name: aws-region
+          value: $(params.aws-region)
+        - name: state-bucket
+          value: $(params.state-bucket)
+        - name: state-lock-table
+          value: $(params.state-lock-table)
+
+      workspaces:
+        - name: source
+          workspace: shared-data

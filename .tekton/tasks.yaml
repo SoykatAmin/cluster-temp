@@ -1,0 +1,284 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: terraform-init-validate
+  namespace: "bs-team-alpha-dev"
+  labels:
+    app.kubernetes.io/part-of: "cluster-lunedi"
+    app.kubernetes.io/component: task-terraform-init-validate
+    owner: so.amin
+spec:
+  description: Initializes Terraform S3 backend and validates syntax and formatting.
+  workspaces:
+    - name: source
+      description: Shared workspace containing repository source code.
+  params:
+    - name: terraform-dir
+      type: string
+      default: "terraform"
+      description: Relative directory containing terraform files.
+    - name: aws-region
+      type: string
+      default: "eu-west-1"
+      description: Target AWS region for S3 backend.
+    - name: state-bucket
+      type: string
+      default: "so-amin-idp-terraform-backend"
+      description: S3 bucket for Terraform remote state.
+    - name: state-lock-table
+      type: string
+      default: "so-amin-idp-terraform-backend-lock-table"
+      description: DynamoDB table for Terraform state locking.
+
+  steps:
+    - name: init-and-validate
+      image: hashicorp/terraform:1.9.8
+      workingDir: $(workspaces.source.path)
+      script: |
+        #!/usr/bin/env sh
+        set -eu
+        cd "$(workspaces.source.path)/$(params.terraform-dir)"
+
+        echo "=================================================="
+        echo " 1. Initializing Terraform with Remote S3 Backend "
+        echo "=================================================="
+        terraform init -input=false \
+          -backend-config="bucket=$(params.state-bucket)" \
+          -backend-config="dynamodb_table=$(params.state-lock-table)" \
+          -backend-config="region=$(params.aws-region)"
+
+        echo "=================================================="
+        echo " 2. Validating Terraform Configurations            "
+        echo "=================================================="
+        terraform validate
+
+        echo "=================================================="
+        echo " 3. Checking Terraform Code Formatting             "
+        echo "=================================================="
+        terraform fmt -check -diff
+
+
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: tfsec-security-scan
+  namespace: "bs-team-alpha-dev"
+  labels:
+    app.kubernetes.io/part-of: "cluster-lunedi"
+    app.kubernetes.io/component: task-tfsec-security-scan
+    owner: so.amin
+spec:
+  description: Executes static security analysis across Terraform manifests.
+  workspaces:
+    - name: source
+  params:
+    - name: terraform-dir
+      type: string
+      default: "terraform"
+
+  steps:
+    - name: run-tfsec
+      image: aquasec/tfsec:v1.28.11
+      workingDir: $(workspaces.source.path)
+      script: |
+        #!/usr/bin/env sh
+        set -eu
+        cd "$(workspaces.source.path)/$(params.terraform-dir)"
+
+        echo "=================================================="
+        echo " Running tfsec Static Security Vulnerability Scan "
+        echo "=================================================="
+        tfsec . --concise-output --soft-fail
+
+
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: terraform-plan
+  namespace: "bs-team-alpha-dev"
+  labels:
+    app.kubernetes.io/part-of: "cluster-lunedi"
+    app.kubernetes.io/component: task-terraform-plan
+    owner: so.amin
+spec:
+  description: Generates a deterministic, speculative execution plan file.
+  workspaces:
+    - name: source
+  params:
+    - name: terraform-dir
+      type: string
+      default: "terraform"
+    - name: aws-region
+      type: string
+      default: "eu-west-1"
+    - name: state-bucket
+      type: string
+      default: "so-amin-idp-terraform-backend"
+    - name: state-lock-table
+      type: string
+      default: "so-amin-idp-terraform-backend-lock-table"
+
+  steps:
+    - name: plan
+      image: hashicorp/terraform:1.9.8
+      workingDir: $(workspaces.source.path)
+      script: |
+        #!/usr/bin/env sh
+        set -eu
+        cd "$(workspaces.source.path)/$(params.terraform-dir)"
+
+        echo "=================================================="
+        echo " Initializing Terraform Backend for Planning      "
+        echo "=================================================="
+        terraform init -input=false \
+          -backend-config="bucket=$(params.state-bucket)" \
+          -backend-config="dynamodb_table=$(params.state-lock-table)" \
+          -backend-config="region=$(params.aws-region)"
+
+        echo "=================================================="
+        echo " Generating Speculative Terraform Plan (tfplan)   "
+        echo "=================================================="
+        terraform plan -input=false -out=tfplan.binary
+
+        echo "Creating human-readable plan summary..."
+        terraform show -no-color tfplan.binary > tfplan.txt
+        head -n 50 tfplan.txt
+        echo "Plan binary written to $(workspaces.source.path)/$(params.terraform-dir)/tfplan.binary"
+
+
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: terraform-apply
+  namespace: "bs-team-alpha-dev"
+  labels:
+    app.kubernetes.io/part-of: "cluster-lunedi"
+    app.kubernetes.io/component: task-terraform-apply
+    owner: so.amin
+spec:
+  description: Applies the generated Terraform plan using AWS IAM Role assumed via OIDC ServiceAccount.
+  workspaces:
+    - name: source
+  params:
+    - name: terraform-dir
+      type: string
+      default: "terraform"
+    - name: aws-region
+      type: string
+      default: "eu-west-1"
+    - name: state-bucket
+      type: string
+      default: "so-amin-idp-terraform-backend"
+      description: S3 bucket for Terraform remote state.
+    - name: state-lock-table
+      type: string
+      default: "so-amin-idp-terraform-backend-lock-table"
+      description: DynamoDB table for Terraform state locking.
+  results:
+    - name: cluster-name
+      description: Name of the provisioned EKS cluster.
+    - name: cluster-endpoint
+      description: API server endpoint of the provisioned EKS cluster.
+    - name: oidc-provider-arn
+      description: OIDC Provider ARN configured for IRSA integrations.
+
+  steps:
+    - name: apply
+      image: hashicorp/terraform:1.9.8
+      workingDir: $(workspaces.source.path)
+      script: |
+        #!/usr/bin/env sh
+        set -eu
+        cd "$(workspaces.source.path)/$(params.terraform-dir)"
+        export AWS_REGION="$(params.aws-region)"
+        export AWS_DEFAULT_REGION="$(params.aws-region)"
+
+        echo "=================================================="
+        echo " 1. Initializing Terraform Backend for Apply      "
+        echo "=================================================="
+        terraform init -input=false \
+          -backend-config="bucket=$(params.state-bucket)" \
+          -backend-config="dynamodb_table=$(params.state-lock-table)" \
+          -backend-config="region=$(params.aws-region)"
+
+        echo "=================================================="
+        echo " 2. Applying Pre-computed Terraform Plan          "
+        echo "=================================================="
+        terraform apply -input=false -auto-approve tfplan.binary
+
+        echo "=================================================="
+        echo " 3. Extracting Outputs into Tekton Results        "
+        echo "=================================================="
+        terraform output -raw cluster_name > $(results.cluster-name.path)
+        terraform output -raw cluster_endpoint > $(results.cluster-endpoint.path)
+        terraform output -raw oidc_provider_arn > $(results.oidc-provider-arn.path)
+
+        echo "Cluster Provisioning Complete!"
+        echo "Cluster Name:     $(cat $(results.cluster-name.path))"
+        echo "Cluster Endpoint: $(cat $(results.cluster-endpoint.path))"
+
+
+
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: terraform-destroy
+  namespace: "bs-team-alpha-dev"
+  labels:
+    app.kubernetes.io/part-of: "cluster-lunedi"
+    app.kubernetes.io/component: task-terraform-destroy
+    owner: so.amin
+spec:
+  description: Destroys EKS cluster resources while preserving shared platform VPC networking.
+  workspaces:
+    - name: source
+  params:
+    - name: terraform-dir
+      type: string
+      default: "terraform"
+    - name: aws-region
+      type: string
+      default: "eu-west-1"
+    - name: state-bucket
+      type: string
+      default: "so-amin-idp-terraform-backend"
+      description: S3 bucket for Terraform remote state.
+    - name: state-lock-table
+      type: string
+      default: "so-amin-idp-terraform-backend-lock-table"
+      description: DynamoDB table for Terraform state locking.
+
+  steps:
+    - name: destroy
+      image: hashicorp/terraform:1.9.8
+      workingDir: $(workspaces.source.path)
+      script: |
+        #!/usr/bin/env sh
+        set -eu
+        cd "$(workspaces.source.path)/$(params.terraform-dir)"
+        export AWS_REGION="$(params.aws-region)"
+        export AWS_DEFAULT_REGION="$(params.aws-region)"
+
+        echo "=================================================="
+        echo " 1. Initializing Terraform Remote Backend         "
+        echo "=================================================="
+        terraform init -input=false \
+          -backend-config="bucket=$(params.state-bucket)" \
+          -backend-config="dynamodb_table=$(params.state-lock-table)" \
+          -backend-config="region=$(params.aws-region)"
+
+        echo "=================================================="
+        echo " 2. Destroying EKS Cluster & Dependent Resources  "
+        echo "=================================================="
+        terraform destroy -input=false -auto-approve
+
+        echo "=================================================="
+        echo " Cluster Destruction Complete                     "
+        echo " Shared Platform VPC preserved untouched.         "
+        echo "=================================================="
+

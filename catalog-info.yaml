@@ -1,0 +1,57 @@
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: "cluster-lunedi"
+  title: "cluster-lunedi"
+  description: "Production AWS EKS Cluster cluster-lunedi (eu-west-1, Kubernetes 1.37) provisioned with Terraform and Tekton."
+  annotations:
+    # Tekton Plugin Integration (Janus-IDP) - points to exact pipeline name
+    janus-idp.io/tekton: "cluster-lunedi-provisioning"
+    tekton.dev/cicd: "true"
+    # Kubernetes Core Plugin & PEP Mapping
+    backstage.io/kubernetes-id: "cluster-lunedi"
+    backstage.io/kubernetes-cluster: "cluster-lunedi"
+    backstage.io/kubernetes-namespace: "bs-team-alpha-dev"
+    # Reconciler & PDP Multi-Tenant Group Mapping
+    company.io/owner-group: "group:default/team-alpha"
+    # Cloud Provider & Governance Metadata
+    aws.amazon.com/region: "eu-west-1"
+    aws.amazon.com/owner: "so.amin"
+    backstage.io/techdocs-ref: dir:.
+  labels:
+    owner: so.amin
+    cloud-provider: aws
+    managed-by: terraform-tekton
+  tags:
+    - aws
+    - eks
+    - kubernetes
+    - terraform
+    - tekton
+    - "eu-west-1"
+    - "k8s-1-37"
+spec:
+  type: infrastructure
+  owner: "group:default/team-alpha"
+  system: platform
+  lifecycle: production
+  providesResources:
+    - "resource:default/cluster-lunedi-cluster"
+---
+apiVersion: backstage.io/v1alpha1
+kind: Resource
+metadata:
+  name: "cluster-lunedi-cluster"
+  title: "cluster-lunedi (EKS Cluster)"
+  description: "Target Kubernetes Cluster resource for cluster-lunedi."
+  annotations:
+    aws.amazon.com/region: "eu-west-1"
+    aws.amazon.com/owner: "so.amin"
+  labels:
+    owner: so.amin
+    cloud-provider: aws
+spec:
+  type: kubernetes-cluster
+  owner: "group:default/team-alpha"
+  system: platform
+  lifecycle: production

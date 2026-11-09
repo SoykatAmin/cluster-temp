@@ -1,0 +1,114 @@
+---
+apiVersion: triggers.tekton.dev/v1beta1
+kind: TriggerBinding
+metadata:
+  name: "cluster-lunedi-trigger-binding"
+  namespace: "bs-team-alpha-dev"
+  labels:
+    app.kubernetes.io/part-of: "cluster-lunedi"
+    owner: so.amin
+
+spec:
+  params:
+    - name: repo-url
+      value: $(body.repository.clone_url)
+    - name: git-revision
+      value: $(body.head_commit.id)
+    - name: git-branch
+      value: $(body.ref)
+    - name: pusher-name
+      value: $(body.pusher.name)
+
+
+---
+apiVersion: triggers.tekton.dev/v1beta1
+kind: TriggerTemplate
+metadata:
+  name: "cluster-lunedi-trigger-template"
+  namespace: "bs-team-alpha-dev"
+  labels:
+    app.kubernetes.io/part-of: "cluster-lunedi"
+    owner: so.amin
+spec:
+  params:
+    - name: repo-url
+      description: Git clone URL from the push event
+    - name: git-revision
+      description: Git commit SHA
+    - name: git-branch
+      description: Ref of the branch
+    - name: pusher-name
+      description: GitHub identity of the user pushing the commit
+  resourcetemplates:
+    - apiVersion: tekton.dev/v1
+      kind: PipelineRun
+      metadata:
+        generateName: "cluster-lunedi-push-"
+        namespace: "bs-team-alpha-dev"
+        labels:
+          tekton.dev/pipeline: "cluster-lunedi-provisioning"
+          app.kubernetes.io/name: "cluster-lunedi"
+          app.kubernetes.io/part-of: "cluster-lunedi"
+          owner: so.amin
+          janus-idp.io/tekton: "cluster-lunedi-provisioning"
+      spec:
+        pipelineRef:
+          name: "cluster-lunedi-provisioning"
+        taskRunTemplate:
+          serviceAccountName: tekton-pipeline
+        params:
+
+          - name: repo-url
+            value: $(tt.params.repo-url)
+          - name: revision
+            value: $(tt.params.git-revision)
+
+          - name: cluster-name
+            value: "cluster-lunedi"
+          - name: aws-region
+            value: "eu-west-1"
+          - name: state-bucket
+            value: "so-amin-idp-terraform-backend"
+          - name: state-lock-table
+            value: "so-amin-idp-terraform-backend-lock-table"
+        workspaces:
+          - name: shared-data
+            volumeClaimTemplate:
+              metadata:
+                labels:
+                  owner: so.amin
+                  cluster: "cluster-lunedi"
+              spec:
+                accessModes:
+                  - ReadWriteOnce
+                resources:
+                  requests:
+                    storage: 5Gi
+                storageClassName: gp3
+
+---
+apiVersion: triggers.tekton.dev/v1beta1
+kind: EventListener
+metadata:
+  name: "cluster-lunedi-listener"
+  namespace: "bs-team-alpha-dev"
+  labels:
+    app.kubernetes.io/name: "cluster-lunedi"
+    app.kubernetes.io/part-of: "cluster-lunedi"
+    owner: so.amin
+spec:
+  serviceAccountName: tekton-triggers-sa
+  triggers:
+    - name: github-push-to-main
+      interceptors:
+        - ref:
+            name: "cel"
+            apiVersion: triggers.tekton.dev/v1beta1
+            kind: ClusterInterceptor
+          params:
+            - name: "filter"
+              value: "header.match('X-GitHub-Event', 'push') && body.ref == 'refs/heads/main' && body.repository.full_name == 'SoykatAmin/cluster-lunedi'"
+      bindings:
+        - ref: "cluster-lunedi-trigger-binding"
+      template:
+        ref: "cluster-lunedi-trigger-template"
